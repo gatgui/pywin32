@@ -2,3 +2,5 @@
 AutoDuck/*.fmt          text eol=crlf
 *.dsp                   text eol=crlf
 *.dsw                   text eol=crlf
+.git*                   text eol=lf
+SConstruct              text eol=lf
