@@ -115,6 +115,15 @@ w32s_res = env.MakeRES("win32/src/win32service_messages.res", ["win32/src/win32s
 
 pylibdir = excons.OutputBaseDirectory() + "/lib/" + excons.tools.python.Version()
 
+
+def DelayImp(libs):
+   def _func(env):
+      env.Append(LIBS=libs + ["delayimp"])
+      env.Append(LINKFLAGS=map(lambda x: "/delayload:%s.dll" % x, libs))
+
+   return _func
+
+
 prjs = [
    {
       "name": "pywintypes",
