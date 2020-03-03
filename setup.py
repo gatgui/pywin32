@@ -1,6 +1,6 @@
 from __future__ import print_function
 
-build_id="224" # may optionally include a ".{patchno}" suffix.
+build_id="227.1" # may optionally include a ".{patchno}" suffix.
 # Putting build_id at the top prevents automatic __doc__ assignment, and
 # I *want* the build number at the top :)
 __doc__="""This is a distutils setup-script for the pywin32 extensions
@@ -69,6 +69,7 @@ import re
 from tempfile import gettempdir
 import platform
 import shutil
+import subprocess
 
 is_py3k = sys.version_info > (3,) # get this out of the way early on...
 
@@ -80,11 +81,12 @@ except ImportError:
 # The rest of our imports.
 from setuptools import setup
 from distutils.core import Extension
-from distutils.command.install import install
-from distutils.command.build_ext import build_ext
+from setuptools.command.install import install
+from setuptools.command.install_lib import install_lib
+from setuptools.command.build_ext import build_ext
+from setuptools.command.build_py import build_py
 from distutils.command.build import build
 from distutils.command.install_data import install_data
-from distutils.command.build_py import build_py
 from distutils.command.build_scripts import build_scripts
 
 try:
@@ -150,11 +152,24 @@ def find_platform_sdk_dir():
     # Windows SDKs up to version 7 use a reg key SOFTWARE\Microsoft\Microsoft SDKs\Windows
     # SDKs 8 and later use SOFTWARE\Microsoft\Windows Kits\Installed Roots
     # We currently target version 8.1
+    # (and strangely, via  #1293, it appears there may be a 32 bit version of
+    # the SDK available which works OK on 64 bit machines!)
+    flags_variants = [winreg.KEY_READ]
     try:
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                              r"SOFTWARE\Microsoft\Windows Kits\Installed Roots")
-        installRoot = winreg.QueryValueEx(key, "KitsRoot81")[0]
-    except EnvironmentError:
+        flags_variants.append(winreg.KEY_READ | winreg.KEY_WOW64_32KEY)
+    except AttributeError:
+        pass
+    for flags in flags_variants:
+        try:
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"SOFTWARE\Microsoft\Windows Kits\Installed Roots",
+                                0,
+                                flags)
+            installRoot = winreg.QueryValueEx(key, "KitsRoot81")[0]
+            break
+        except EnvironmentError:
+            pass
+    else:
         print("Can't find a windows 8.1 sdk")
         return None
 
@@ -291,9 +306,9 @@ class WinExt (Extension):
         self.delay_load_libraries=delay_load_libraries.split()
         libraries.extend(self.delay_load_libraries)
 
+        extra_link_args = extra_link_args or []
         if export_symbol_file:
-            export_symbols = export_symbols or []
-            export_symbols.extend(self.parse_def_file(export_symbol_file))
+            extra_link_args.append("/DEF:" + export_symbol_file)
 
         # Some of our swigged files behave differently in distutils vs
         # MSVC based builds.  Always define DISTUTILS_BUILD so they can tell.
@@ -321,18 +336,6 @@ class WinExt (Extension):
                             export_symbols)
         self.depends = depends or [] # stash it here, as py22 doesn't have it.
         self.unicode_mode = unicode_mode
-
-    def parse_def_file(self, path):
-        # Extract symbols to export from a def-file
-        result = []
-        for line in open(path).readlines():
-            line = line.rstrip()
-            if line and line[0] in string.whitespace:
-                tokens = line.split()
-                if not tokens[0][0] in string.ascii_letters:
-                    continue
-                result.append(','.join(tokens))
-        return result
 
     def get_source_files(self, dsp):
         result = []
@@ -437,18 +440,13 @@ class WinExt (Extension):
                         break
                 if found_mfc:
                     break
-            # Handle Unicode - if unicode_mode is None, then it means True
-            # for py3k, false for py2
-            unicode_mode = self.unicode_mode
-            if unicode_mode is None:
-                unicode_mode = is_py3k
-            if unicode_mode:
-                self.extra_compile_args.append("/DUNICODE")
-                self.extra_compile_args.append("/D_UNICODE")
-                self.extra_compile_args.append("/DWINNT")
-                # Unicode, Windows executables seem to need this magic:
-                if "/SUBSYSTEM:WINDOWS" in self.extra_link_args:
-                    self.extra_link_args.append("/ENTRY:wWinMainCRTStartup")
+
+        # Handle Unicode - if unicode_mode is None, then it means True
+        # for py3k, false for py2
+        if self.unicode_mode or self.unicode_mode is None and is_py3k:
+            self.extra_compile_args.append("-DUNICODE")
+            self.extra_compile_args.append("-D_UNICODE")
+            self.extra_compile_args.append("-DWINNT")
 
 class WinExt_pythonwin(WinExt):
     def __init__ (self, name, **kw):
@@ -461,11 +459,35 @@ class WinExt_pythonwin(WinExt):
     def get_pywin32_dir(self):
         return "pythonwin"
 
+class WinExt_pythonwin_subsys_win(WinExt_pythonwin):
+    def finalize_options(self, build_ext):
+        WinExt_pythonwin.finalize_options(self, build_ext)
+
+        if build_ext.mingw32:
+            self.extra_link_args.append('-mwindows')
+        else:
+            self.extra_link_args.append('/SUBSYSTEM:WINDOWS')
+
+            if self.unicode_mode or self.unicode_mode is None and is_py3k:
+                # Unicode, Windows executables seem to need this magic:
+                self.extra_link_args.append('/ENTRY:wWinMainCRTStartup')
+
 class WinExt_win32(WinExt):
     def __init__ (self, name, **kw):
         WinExt.__init__(self, name, **kw)
     def get_pywin32_dir(self):
         return "win32"
+
+class WinExt_win32_subsys_con(WinExt_win32):
+    def finalize_options(self, build_ext):
+        WinExt_win32.finalize_options(self, build_ext)
+
+        if build_ext.mingw32:
+            self.extra_link_args.append('-mconsole')
+            if self.unicode_mode:
+                self.extra_link_args.append('-municode')
+        else:
+            self.extra_link_args.append('/SUBSYSTEM:CONSOLE')
 
 class WinExt_ISAPI(WinExt):
     def get_pywin32_dir(self):
@@ -1368,14 +1390,18 @@ class my_install(install):
         if not self.dry_run and not self.root:
             # We must run the script we just installed into Scripts, as it
             # may have had 2to3 run over it.
-            filename = os.path.join(self.prefix, "Scripts", "pywin32_postinstall.py")
+            filename = os.path.join(self.install_scripts, "pywin32_postinstall.py")
             if not os.path.isfile(filename):
                 raise RuntimeError("Can't find '%s'" % (filename,))
             print("Executing post install script...")
             # What executable to use?  This one I guess.
-            os.spawnl(os.P_NOWAIT, sys.executable,
-                      sys.executable, filename,
-                      "-quiet", "-wait", str(os.getpid()), "-install")
+            subprocess.Popen([
+                sys.executable, filename,
+                "-install",
+                "-destination", self.install_lib,
+                "-quiet",
+                "-wait", str(os.getpid()),
+            ])
 
 # As per get_source_files, we need special handling so .mc file is
 # processed first.  It appears there was an intention to fix distutils
@@ -1898,6 +1924,7 @@ com_extensions += [
                         %(mapi)s/PyIMAPITable.i         %(mapi)s/PyIMAPITable.cpp
                         %(mapi)s/PyIMessage.i           %(mapi)s/PyIMessage.cpp
                         %(mapi)s/PyIMsgServiceAdmin.i   %(mapi)s/PyIMsgServiceAdmin.cpp
+                        %(mapi)s/PyIMsgServiceAdmin2.i  %(mapi)s/PyIMsgServiceAdmin2.cpp
                         %(mapi)s/PyIProviderAdmin.i     %(mapi)s/PyIProviderAdmin.cpp
                         %(mapi)s/PyIMsgStore.i          %(mapi)s/PyIMsgStore.cpp
                         %(mapi)s/PyIProfAdmin.i         %(mapi)s/PyIProfAdmin.cpp
@@ -2249,19 +2276,17 @@ other_extensions.append(
 )
 
 W32_exe_files = [
-    WinExt_win32("pythonservice",
+    WinExt_win32_subsys_con("pythonservice",
          sources=[os.path.join("win32", "src", s) for s in
                   "PythonService.cpp PythonService.rc".split()],
          unicode_mode = True,
-         extra_link_args=["/SUBSYSTEM:CONSOLE"],
          libraries = "user32 advapi32 ole32 shell32"),
-    WinExt_pythonwin("Pythonwin",
+    WinExt_pythonwin_subsys_win("Pythonwin",
         sources = [
             "Pythonwin/pythonwin.cpp",
             "Pythonwin/pythonwin.rc",
             "Pythonwin/stdafxpw.cpp",
             ],
-        extra_link_args=["/SUBSYSTEM:WINDOWS"],
         optional_headers=['afxres.h']),
 ]
 
@@ -2283,6 +2308,7 @@ swig_interface_parents = {
     'PyIMAPITable':         '',
     'PyIMessage':           'IMAPIProp',
     'PyIMsgServiceAdmin':   '',
+    'PyIMsgServiceAdmin2':  'IMsgServiceAdmin',
     'PyIProviderAdmin':     '',
     'PyIMsgStore':          'IMAPIProp',
     'PyIProfAdmin':         '',
@@ -2438,6 +2464,17 @@ cmdclass = { 'install': my_install,
              'build_scripts' : my_build_scripts,
            }
 
+classifiers = [ 'Environment :: Win32 (MS Windows)',
+	            'Intended Audience :: Developers',
+	            'License :: OSI Approved :: Python Software Foundation License',
+	            'Operating System :: Microsoft :: Windows',
+	            'Programming Language :: Python :: 2.7',
+	            'Programming Language :: Python :: 3.5',
+	            'Programming Language :: Python :: 3.6',
+	            'Programming Language :: Python :: 3.7',
+	            'Programming Language :: Python :: Implementation :: CPython',
+	          ]
+
 dist = setup(name="pywin32",
       version=str(build_id),
       description="Python for Window Extensions",
@@ -2449,6 +2486,7 @@ dist = setup(name="pywin32",
       author_email = "mhammond@skippinet.com.au",
       url="https://github.com/mhammond/pywin32",
       license="PSF",
+      classifiers = classifiers,
       cmdclass = cmdclass,
       options = {"bdist_wininst":
                     {"install_script": "pywin32_postinstall.py",
